@@ -15,6 +15,7 @@ check_internet() {
 pacman -Sy
 
 # partition the disks
+clear
 i=1
 IFS=$'\n'
 for d in $(lsblk | grep disk); do
@@ -62,6 +63,7 @@ arch-chroot /mnt ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime
 arch-chroot /mnt hwclock --systohc
 
 # Set locale
+clear
 echo ""
 echo "To list all locales enter \"list\""
 read -p "Enter locale: Default [en_US.UTF-8 UTF-8] " locale
@@ -101,7 +103,7 @@ while [ "$?" == "10" ]; do
 done
 
 # Setup user
-echo "Setup user:"
+clear
 read -p "Enter username: " username
 echo ""
 arch-chroot /mnt useradd -m $username
@@ -109,10 +111,11 @@ arch-chroot /mnt usermod -aG wheel,audio,video,optical,storage $username
 arch-chroot /mnt passwd $username
 
 # update packages
+clear
 arch-chroot /mnt pacman -Syu --noconfirm
 
 # bootloader
-echo ""
+clear
 echo "Install bootloader"
 arch-chroot /mnt pacman -S --noconfirm grub efibootmgr dosfstools os-prober mtools
 
@@ -129,6 +132,7 @@ arch-chroot /mnt pacman -S --noconfirm networkmanager
 arch-chroot /mnt systemctl enable NetworkManager
 
 # Install graphics driver
+clear
 packages=$(pacman -Ssq xf86-video)
 i=1
 IFS=$'\n'
@@ -167,6 +171,7 @@ arch-chroot /mnt pacman -Sy
 arch-chroot /mnt pacman -S --noconfirm paru
 
 # YADM config
+clear
 read -p "Do you have an existing yadm config you would like to enable now? (y/N) " yadm_config
 if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
     arch-chroot /mnt pacman -S --noconfirm yadm
