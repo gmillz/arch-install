@@ -91,8 +91,14 @@ echo ""
 echo $hostname > /mnt/etc/hostname
 
 # Set root password
+clear
 echo "Set root password:"
 arch-chroot /mnt passwd
+while [ "$?" == "10" ]; do
+    clear
+    echo "Setting root password failed. Please try again."
+    arch-chroot /mnt passwd
+done
 
 # Setup user
 echo "Setup user:"
