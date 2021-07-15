@@ -110,6 +110,11 @@ echo ""
 arch-chroot /mnt useradd -m $username
 arch-chroot /mnt usermod -aG wheel,audio,video,optical,storage $username
 arch-chroot /mnt passwd $username
+while [ "$?" == "10" ]; do
+    clear
+    echo "Setting password for $username failed. Please try again."
+    arch-chroot /mnt passwd $username
+done
 
 # update packages
 clear
