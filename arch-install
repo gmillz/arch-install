@@ -181,6 +181,11 @@ echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc
 arch-chroot /mnt pacman -Sy
 arch-chroot /mnt pacman -S --noconfirm paru
 
+# makepkg config mods
+sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$(nproc)\"/g" /mnt/etc/makepkg.conf
+sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z --threads=0 -)/g" /mnt/etc/makepkg.conf
+sed -i "s/COMPRESSZST=(zstd -c -z -q -)/COMPRESSZST=(zstd -c -z -q --threads=0 -)/g" /mnt/etc/makepkg.conf
+
 # YADM config
 clear
 read -p "Do you have an existing yadm config you would like to enable now? (y/N) " yadm_config
