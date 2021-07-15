@@ -13,6 +13,8 @@ check_internet() {
 
 # Sync pacman
 pacman -Sy
+pacman -S --noconfirm reflector
+reflector -c US --latest 10 --sort rate --protocol https --save /etc/pacman.d/mirrorlist
 
 # partition the disks
 clear
