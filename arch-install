@@ -145,7 +145,7 @@ for v in ${packages[@]}; do
 done
 echo "${names[@]/%/$'\n'}" | column
 read -p "Enter selection: " video_driver
-arch-chroot /mnt pacman -S --noconfirm $video_driver
+arch-chroot /mnt pacman -S --noconfirm ${array[$video_driver]}
 
 # Install X
 arch-chroot /mnt pacman -S --noconfirm xorg xorg-xinit xterm
