@@ -88,6 +88,7 @@ arch-chroot /mnt locale-gen
 echo LANG=$(echo $locale | cut -d' ' -f1) > /mnt/etc/locale.conf
 
 # Set hostname
+clear
 read -p "Enter hostname: " hostname
 echo ""
 echo $hostname > /mnt/etc/hostname
