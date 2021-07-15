@@ -1,0 +1,169 @@
+#!/bin/bash
+
+base_packages=("base" "linux" "linux-firmware" "nano" "sudo")
+
+check_internet() {
+    wget -q --tries=10 --timeout=20 --spider https://google.com
+    if [[ $? -eq 0 ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Sync pacman
+pacman -Sy
+
+# partition the disks
+i=1
+IFS=$'\n'
+for d in $(lsblk | grep disk); do
+    names=(${names[@]} "$i $d")
+    array[$i]=$d
+    i=$(($i + 1))
+done
+
+echo "${names[@]/%/$'\n'}"
+read -p "Enter selection: " disk_id
+disk=$(echo ${array[$disk_id]} | cut -d' ' -f1)
+
+# create partition table
+parted /dev/$disk mktable gpt
+# make efi partition
+parted /dev/$disk mkpart primary fat32 1MiB 500MiB
+parted /dev/$disk set 1 esp on
+mkfs.fat -F32 /dev/"$disk"1
+efi_part=/dev/"$disk"1
+
+# make swap partition
+parted /dev/$disk mkpart primary linux-swap 501MiB 2500MiB
+mkswap /dev/"$disk"2
+swapon /dev/"$disk"2
+
+# make main partition
+parted /dev/$disk mkpart primary ext4 2501MiB 100%
+mkfs.ext4 /dev/"$disk"3
+
+mount /dev/"$disk"3 /mnt
+
+# Install base packages
+pacstrap /mnt ${base_packages[@]}
+
+# Generate fstab
+genfstab -U /mnt >> /mnt/etc/fstab
+
+# Configure system
+
+# Configure sudo for wheel group
+sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/g' /mnt/etc/sudoers
+
+# Set timezone
+arch-chroot /mnt ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime
+arch-chroot /mnt hwclock --systohc
+
+# Set locale
+echo ""
+echo "To list all locales enter \"list\""
+read -p "Enter locale: Default [en_US.UTF-8 UTF-8] " locale
+if [ -z "$locale" ]; then
+    locale="en_US.UTF-8 UTF-8"
+fi
+if [ "$locale" == "list" ]; then
+    i=1
+    IFS=$'\n'
+    for loc in $(cat /usr/share/i18n/SUPPORTED); do
+        names=(${names[@]} "$i $loc")
+        array[$i]="$loc"
+        i=$(($i + 1))
+    done
+    echo "${names[@]/%/$'\n'}" | column
+    read -p "Enter selection: " locale_id
+    locale="${array[$locale_id]}"
+fi
+echo "Selected locale: $locale"
+echo $locale >> /mnt/etc/locale.gen
+arch-chroot /mnt locale-gen
+echo LANG=$(echo $locale | cut -d' ' -f1) > /mnt/etc/locale.conf
+
+# Set hostname
+read -p "Enter hostname: " hostname
+echo ""
+echo $hostname > /mnt/etc/hostname
+
+# Set root password
+echo "Set root password:"
+arch-chroot /mnt passwd
+
+# Setup user
+echo "Setup user:"
+read -p "Enter username: " username
+echo ""
+arch-chroot /mnt useradd -m $username
+arch-chroot /mnt usermod -aG wheel,audio,video,optical,storage $username
+arch-chroot /mnt passwd $username
+
+# update packages
+arch-chroot /mnt pacman -Syu --noconfirm
+
+# bootloader
+echo ""
+echo "Install bootloader"
+arch-chroot /mnt pacman -S --noconfirm grub efibootmgr dosfstools os-prober mtools
+
+# mount efi partition
+mkdir -p /mnt/boot/EFI
+mount $efi_part /mnt/boot/EFI
+
+# install grub
+arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/EFI --bootloader-id=GRUB
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+# install networkmanager
+arch-chroot /mnt pacman -S --noconfirm networkmanager
+arch-chroot /mnt systemctl enable NetworkManager
+
+# Install graphics driver
+packages=$(pacman -Ssq xf86-video)
+i=1
+IFS=$'\n'
+for v in ${packages[@]}; do
+    names=(${names[@]} "$i $v")
+    array[$i]=$v
+    i=$(($i + 1))
+done
+echo "${names[@]/%/$'\n'}" | column
+read -p "Enter selection: " video_driver
+arch-chroot /mnt pacman -S --noconfirm $video_driver
+
+# Install X
+arch-chroot /mnt pacman -S --noconfirm xorg xorg-xinit xterm
+
+# Install lightdm
+arch-chroot /mnt pacman -S --noconfirm lightdm lightdm-gtk-greeter
+arch-chroot /mnt systemctl enable lightdm
+
+arch-chroot /mnt pacman -S --noconfirm qtile dmenu
+
+# Install xfce4-terminal
+arch-chroot /mnt pacman -S --noconfirm xfce4-terminal
+
+# Install base-devel
+arch-chroot /mnt pacman -S --noconfirm base-devel git 
+
+# Install arch-repo (gmillz)
+echo "" >> /mnt/etc/pacman.conf
+echo "[arch-repo]" >> /mnt/etc/pacman.conf
+echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
+echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
+
+# Install paru
+arch-chroot /mnt pacman -Sy
+arch-chroot /mnt pacman -S --noconfirm paru
+
+# YADM config
+read -p "Do you have an existing yadm config you would like to enable now? (y/N) " yadm_config
+if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
+    arch-chroot /mnt pacman -S --noconfirm yadm
+    read -p "Enter git url to your yadm repo: " yadm_repo
+    arch-chroot /mnt su $username -c "yadm clone $yadm_repo"
+fi
