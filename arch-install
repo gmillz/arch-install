@@ -183,8 +183,13 @@ clear
 read -p "Do you have an existing yadm config you would like to enable now? (y/N) " yadm_config
 if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
     arch-chroot /mnt pacman -S --noconfirm yadm
+    clear
     read -p "Enter git url to your yadm repo: " yadm_repo
-    arch-chroot /mnt su $username -c "yadm clone $yadm_repo"
+    mv /mnt/home/$username/.bashrc /mnt/home/$username/.bashrc-backup
+    arch-chroot /mnt su $username -c "yadm clone --bootstrap $yadm_repo"
+    if [ ! -f "/mnt/home/$username/.bashrc" ]; then
+        mv /mnt/home/$username/.bashrc-backup /mnt/home/$username/.bashrc
+    fi
 fi
 
 # extra-packages
