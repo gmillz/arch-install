@@ -158,11 +158,33 @@ arch-chroot /mnt pacman -S --noconfirm ${array[$video_driver]}
 # Install X
 arch-chroot /mnt pacman -S --noconfirm xorg xorg-xinit xterm
 
-# Install lightdm
+# Install Display Manager
 arch-chroot /mnt pacman -S --noconfirm lightdm lightdm-gtk-greeter
 arch-chroot /mnt systemctl enable lightdm
 
-arch-chroot /mnt pacman -S --noconfirm qtile dmenu
+dess=("xfce4" "qtile" "gnome" "plasma")
+xfce4=("xfce4" "xfce4-goodies")
+qtile=("qtile" "dmenu")
+gnome=("gnome" "gnome-extra")
+plasma=("plasma" "kde-applications")
+
+i=1
+names=()
+for d in ${dess[@]}; do
+    names=("${names[@]}" "$i $d")
+    des[$i]=$d
+    i=$(($i + 1))
+done
+clear
+echo "Select Window Manager."
+echo "${names[@]/%/$'\n'}" | column
+read -p "Enter selection: " de
+eval 'pac=${'${des[$de]}'[@]}'
+echo $pac
+IFS=' '
+arch-chroot /mnt pacman -S --noconfirm $pac
+
+#arch-chroot /mnt pacman -S --noconfirm qtile dmenu
 
 # Install fonts
 arch-chroot /mnt pacman -S --noconfirm noto-fonts opendesktop-fonts otf-font-awesome
