@@ -162,6 +162,9 @@ arch-chroot /mnt systemctl enable lightdm
 
 arch-chroot /mnt pacman -S --noconfirm qtile dmenu
 
+# Install fonts
+arch-chroot /mnt pacman -S --noconfirm noto-fonts opendesktop-fonts otf-font-awesome
+
 # Install xfce4-terminal
 arch-chroot /mnt pacman -S --noconfirm xfce4-terminal
 
