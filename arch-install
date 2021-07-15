@@ -180,3 +180,25 @@ if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
     read -p "Enter git url to your yadm repo: " yadm_repo
     arch-chroot /mnt su $username -c "yadm clone $yadm_repo"
 fi
+
+# extra-packages
+install_extra_packages() {
+    packages=($(grep "^[^#;]" $1))
+    arch-chroot /mnt su $username -c "paru --skipreview --sudoflags \"-S\" -S --noconfirm $(grep "^[^#;]" $1 | tr "\n" " ")"
+}
+clear
+if [ -f "packages.txt" ]; then
+    echo "Installing extra packages defined by user"
+    install_extra_packages packages.txt
+# check arch-install config dir in case of packages.txt in yadm repo
+elif [ -f "/home/$username/.config/arch-install/packages.txt" ]; then
+    install_extra_packages /home/$username/.config/arch-install/packages.txt
+else
+    read -p "Do you want to install additional packages from url containing packages.txt? (y/N) " answer
+    if [ "$answer" == "Y" ] || [ "$answer" == "y" ]; then
+        clear
+        read -p "Enter url to packages.txt file: " packages_url
+        curl -s $packages_url -o packages.txt
+        install_extra_packages packages.txt
+    fi
+fi
