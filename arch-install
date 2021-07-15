@@ -196,8 +196,8 @@ if [ -f "packages.txt" ]; then
     echo "Installing extra packages defined by user"
     install_extra_packages packages.txt
 # check arch-install config dir in case of packages.txt in yadm repo
-elif [ -f "/home/$username/.config/arch-install/packages.txt" ]; then
-    install_extra_packages /home/$username/.config/arch-install/packages.txt
+elif [ -f "/mnt/home/$username/.config/arch-install/packages.txt" ]; then
+    install_extra_packages /mnt/home/$username/.config/arch-install/packages.txt
 else
     read -p "Do you want to install additional packages from url containing packages.txt? (y/N) " answer
     if [ "$answer" == "Y" ] || [ "$answer" == "y" ]; then
