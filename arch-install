@@ -1,6 +1,37 @@
 #!/bin/bash
 
-base_packages=("base" "linux" "linux-firmware" "nano" "sudo")
+if [ ! -f "$PWD/ai.config" ]; then
+    curl -LO gmillz.net/ai.config
+fi
+source $PWD/ai.config
+
+EFIBOOT=$( ! dmesg | grep -q efi; echo $?)
+VIRT=$( ! lspci | grep -iq virt; echo $?)
+if lscpu | grep -q GenuineIntel; then
+    CPUVENDOR="intel"
+elif lscpu | grep -q AuthenticAMD; then
+    CPUVENDOR="amd"
+fi
+UUIDBOOT=""
+UUIDROOT=""
+
+PARTUUID_BOOT=""
+PARTUUID_ROOT=""
+
+ROOT_DEV=""
+
+CMDLINE_LINUX_ROOT=""
+CMDLINE_LINUX=""
+
+LVM=0
+BOOTLOADER=grub
+
+ESP_DIRECTORY="/boot"
+
+AUR_ENABLED=$( ! arch-chroot /mnt which paru; echo $?)
+
+pacman -Sy
+complete_package_list=$(pacman -Slq)
 
 check_internet() {
     wget -q --tries=10 --timeout=20 --spider https://google.com
@@ -11,240 +42,867 @@ check_internet() {
     fi
 }
 
-# Sync pacman
-pacman -Sy
-pacman -S --noconfirm reflector
-reflector -c US --latest 10 --sort rate --protocol https --save /etc/pacman.d/mirrorlist
+cpm_install() {
+    IFS=' '
+    packages=($@)
+    if [ "$AUR_ENABLED" == "0" ]; then
+        arch-chroot /mnt pacman -S --noconfirm --needed ${packages[@]}
+    else
+        arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) ALL$/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
+        for package in ${packages[@]}; do
+            arch-chroot /mnt su paru -c "paru -S --noconfirm --needed --skipreview $package"
+        done
+        arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) NOPASSWD: ALL$/%wheel ALL=(ALL) ALL/' /etc/sudoers
+    fi
+}
 
-# partition the disks
-clear
-i=1
-IFS=$'\n'
-for d in $(lsblk | grep disk); do
-    names=(${names[@]} "$i $d")
-    array[$i]=$d
-    i=$(($i + 1))
-done
-
-echo "${names[@]/%/$'\n'}"
-read -p "Enter selection: " disk_id
-disk=$(echo ${array[$disk_id]} | cut -d' ' -f1)
-
-# create partition table
-parted /dev/$disk mktable gpt
-# make efi partition
-parted /dev/$disk mkpart primary fat32 1MiB 500MiB
-parted /dev/$disk set 1 esp on
-mkfs.fat -F32 /dev/"$disk"1
-efi_part=/dev/"$disk"1
-
-# make swap partition
-parted /dev/$disk mkpart primary linux-swap 501MiB 2500MiB
-mkswap /dev/"$disk"2
-swapon /dev/"$disk"2
-
-# make main partition
-parted /dev/$disk mkpart primary ext4 2501MiB 100%
-mkfs.ext4 /dev/"$disk"3
-
-mount /dev/"$disk"3 /mnt
-
-# Install base packages
-pacstrap /mnt ${base_packages[@]}
-
-# Generate fstab
-genfstab -U /mnt >> /mnt/etc/fstab
-
-# Configure system
-
-# Configure sudo for wheel group
-sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/g' /mnt/etc/sudoers
-
-# Set timezone
-arch-chroot /mnt ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime
-arch-chroot /mnt hwclock --systohc
-
-# Set locale
-clear
-echo ""
-echo "To list all locales enter \"list\""
-read -p "Enter locale: Default [en_US.UTF-8 UTF-8] " locale
-if [ -z "$locale" ]; then
-    locale="en_US.UTF-8 UTF-8"
-fi
-if [ "$locale" == "list" ]; then
-    i=1
-    IFS=$'\n'
-    for loc in $(cat /usr/share/i18n/SUPPORTED); do
-        names=(${names[@]} "$i $loc")
-        array[$i]="$loc"
-        i=$(($i + 1))
+get_proper_package_list() {
+    offset="$1"
+    shift
+    list=($@)
+    while [[ $i -lt "${#list[@]}" ]]; do
+        if echo "${complete_package_list[@]}" | grep -q "${list[$i]}"; then
+            if [ "$offset" == "2" ]; then
+                echo "${list[$i]}" "${list[$i+1]}"
+            else
+                echo "${list[$i]}"
+            fi
+        fi
+        i=$(($i + $offset))
     done
-    echo "${names[@]/%/$'\n'}" | column
-    read -p "Enter selection: " locale_id
-    locale="${array[$locale_id]}"
-fi
-echo "Selected locale: $locale"
-echo $locale >> /mnt/etc/locale.gen
-arch-chroot /mnt locale-gen
-echo LANG=$(echo $locale | cut -d' ' -f1) > /mnt/etc/locale.conf
+        
+}
+
+archchroot() {
+    arch-chroot /mnt $@
+}
+
+_reboot() {
+    arch-chroot /mnt userdel -r paru
+    umount /mnt/boot
+    umount /mnt
+    reboot
+}
+
+_read() {
+    read -d '' -t 0.1 -n 10000
+    read -p "$1" var
+    echo $var
+}
+
+pressanykey() {
+    read -d '' -t 0.1 -n 10000
+    read -n1 -p "Press any key to continue..."
+}
+
+main_title="Arch Install"
+exit="Exit"
+_menu() {
+    title="$1"
+    shift
+    default="$1"
+    shift
+    sel=$(whiptail --notags --backtitle "$main_title" --title "$title" --menu "" --cancel-button "$exit" --default-item "$default" 0 0 0 "$@" 3>&1 1>&2 2>&3)
+    echo $sel
+}
+
+_multiselect_menu() {
+    title="$1"
+    shift
+    sel=$(whiptail --notags --backtitle "$main_title" --title "$title" --checklist "" 0 0 0 "$@" 3>&1 1>&2 2>&3)
+    echo $sel
+}
+
+main_menu() {
+    result=$(_menu "Main Menu" "$1" "${main_menu[@]}")
+    $result
+}
+
+extras_menu() {
+    # Ask to install paru to enable the AUR
+    result=$(_menu "Extras" "." "${extras_menu[@]}")
+    $result
+}
+
+configure_system() {
+    result=$(_menu "Configure System" "." "${configure_menu[@]}")
+    $result
+}
+
+partition_disks() {
+    default="$1"
+    options=()
+    options+=("auto_part_gpt" "Auto partitions (gpt,efi,swap)")
+    options+=("auto_part_gpt_noswap" "Auto partitions (gpt,efi,noswap)")
+    options+=("manual_part_cfdisk" "Manual Partitioning (cfdisk)")
+    options+=("manual_part_cgdisk" "Manual Partitioning (cfdisk)")
+    options+=("logical_raid" "Create LVM Raid")
+    options+=("manual_part" "Manual Partitioning (bash)")
+    options+=("main_menu" "Back")
+    result=$(_menu "Partitioning" "$default" "${options[@]}")
+    $result
+    main_menu base_install
+}
+
+auto_part_gpt() {
+    partition 1
+}
+auto_part_gpt_noswap() {
+    partition 0
+}
+manual_part_cfdisk() {
+    disk=$(selectdisk)
+    if [ "$?" == "0" ]; then
+        clear
+        cfdisk "$device"
+    fi
+}
+
+manual_part_cgdisk() {
+    disk=$(selectdisk)
+    if [ "$?" == "0" ]; then
+        clear
+        cgdisk "$device"
+    fi
+}
+
+logical_raid() {
+	LVM=1
+    disks=$(select_multi_disk)
+    logdisks=()
+	for disk in ${disks}; do
+        # create partition table
+        if [ "$EFIBOOT" == 1 ]; then
+            parted $disk mktable gpt
+        else
+            parted $disk mktable msdos
+        fi
+        # make efi partition
+        if [ "$EFIBOOT" == 1 ] && [ -z "$UUID_BOOT" ]; then 
+            parted $disk mkpart primary fat32 1MiB 500MiB
+            parted $disk set 1 esp on
+			parted $disk mkpart primary 501MiB 100%
+			logdisks+=(${disk}2)
+            mkfs.fat -F32 "$disk"1
+            efi_part="$disk"1
+            UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
+            PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
+		else
+		    parted $disk mkpart primary 1MB 100%
+			logdisks+=(${disk}1)
+        fi
+	done
+	IFS=' '
+	vgcreate arch ${logdisks[@]}
+	lvcreate -l 100%FREE arch -n rootvol
+	mkfs.ext4 /dev/arch/rootvol
+	mount /dev/arch/rootvol /mnt
+	mkdir /mnt/boot
+	mount $efi_part /mnt$ESP_DIRECTORY
+    PARTUUID_ROOT=$(blkid -s PARTUUID -o value /dev/arch/rootvol)
+    UUID_ROOT=$(blkid -s UUID -o value /dev/arch/rootvol)
+    ROOT_DEV="/dev/arch/rootvol"
+	pressanykey
+    partition_disks "${FUNCNAME[0]}"
+}
+
+base_install() {
+    # Sync pacman
+    pacman -Sy
+    # Install reflector and update mirrorlist
+    pacman -S --noconfirm reflector
+    reflector -c US --latest 10 --sort rate --protocol https --save /etc/pacman.d/mirrorlist
+
+    # Install base packages
+    pacstrap /mnt ${base_packages[@]}
+
+    # Generate fstab
+    genfstab -U /mnt >> /mnt/etc/fstab
+
+    # Configure sudo for wheel group
+    sed -i 's/# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/g' /mnt/etc/sudoers
+
+    # Set timezone
+    arch-chroot /mnt ln -sf /usr/share/zoneinfo/America/Chicago /etc/localtime
+    arch-chroot /mnt hwclock --systohc
+
+    # install networkmanager
+    cpm_install "networkmanager"
+    arch-chroot /mnt systemctl enable NetworkManager
+
+    cpm_install "noto-fonts opendesktop-fonts otf-font-awesome"
+
+    # video driver
+    select_gpu_driver
+
+    set_hostname
+    set_locale
+    set_root_password
+    bootloader
+    enable_aur
+	config_mkinitcpio
+	pressanykey
+
+	# makepkg config mods
+    sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$(nproc)\"/g" /mnt/etc/makepkg.conf
+    sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z --threads=0 -)/g" /mnt/etc/makepkg.conf
+    sed -i "s/COMPRESSZST=(zstd -c -z -q -)/COMPRESSZST=(zstd -c -z -q --threads=0 -)/g" /mnt/etc/makepkg.conf
+
+    main_menu setup_user
+}
+
+config_mkinitcpio() {
+	HOOKS=$(grep -Po "^HOOKS=\(\K.+" /mnt/etc/mkinitcpio.conf | tr -d ')')
+
+    if [ "$LVM" == "1" ]; then
+	    cpm_install "lvm2"
+	fi
+
+	if [ "$BOOTLOADER" == "systemd" ]; then
+		if [ "$LVM" == "1" ]; then
+		    HOOKS=$(echo $HOOKS | sed 's/filesystems keyboard/keyboard filesystems/')
+			HOOKS=$(echo $HOOKS | sed 's/keyboard/keyboard lvm2/')
+		fi
+#	else
+#	    HOOKS=$(echo $HOOKS | sed 's/!udev/udev/')
+#		HOOKS=$(echo $HOOKS | sed 's/!usr/usr/')
+#		HOOKS=$(echo $HOOKS | sed 's/!keymap/keymap/')
+#		HOOKS=$(echo $HOOKS | sed 's/!consolefont/consolefont/')
+#		if [ "$LVM" == "1" ]; then
+#		    HOOKS=$(echo $HOOKS | sed 's/!lvm2/lvm2/')
+#		fi
+	fi
+	arch-chroot /mnt sed -i "s/HOOKS=(.*)$/HOOKS=($HOOKS)/" /etc/mkinitcpio.conf
+	arch-chroot /mnt mkinitcpio -P
+}
+
+enable_aur() {
+    # Install arch-repo (gmillz)
+    if ! grep -q arch-repo /mnt/etc/pacman.conf; then
+        echo "" >> /mnt/etc/pacman.conf
+        echo "[arch-repo]" >> /mnt/etc/pacman.conf
+        echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
+        echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
+    fi
+
+    # Enable multilib
+    sed -i 's/#\[multilib\]/\[multilib\]/' /mnt/etc/pacman.conf
+    sed -i '/\[multilib\]/{n;s/.*/Include = \/etc\/pacman.d\/mirrorlist/}' /mnt/etc/pacman.conf
+
+    # Install paru
+    arch-chroot /mnt pacman -Sy
+    arch-chroot /mnt pacman -S --needed --noconfirm paru base-devel multilib-devel
+    complete_package_list=$(arch-chroot /mnt paru -Slq)
+    AUR_ENABLED=$( ! arch-chroot /mnt which paru; echo $?)
+    arch-chroot /mnt useradd -m -G wheel,storage paru
+    #printf "paru\nparu" | arch-chroot /mnt passwd paru
+}
+
+set_keymap() {
+    keymaps=$(localectl list-keymaps | sort -V)
+    options=()
+    for item in ${keymaps}; do
+        options+=("${item}" "${item}")
+    done
+    keymap=$(_menu "Select Keyboard Layout" "$keymap" "${options[@]}")
+    if [ "$?" == "0" ]; then
+        clear
+        loadkeys ${keymap}
+        pressanykey
+    fi
+}
+
+set_locale() {
+    items=$(ls /usr/share/i18n/locales)
+    options=()
+    IFS=$'\n'
+    for item in ${items}; do
+        options+=("$item" "$item")
+    done
+    unset IFS
+    local l=$(_menu "Set Locale" "$default_locale" "${options[@]}")
+    if [ "$?" == "0" ]; then
+        clear
+        locale="$l"
+        echo "LANG=${locale}.UTF-8" > /mnt/etc/locale.conf
+        echo "LC_COLLATE=C" >> /mnt/etc/locale.conf
+        sed -i '/#'${locale}'.UTF-8/s/^#//g' /mnt/etc/locale.gen
+        archchroot locale-gen
+    fi
+}
+
+select_gpu_driver() {
+    items=$(pacman -Ssq xf86-video)
+    options=()
+    IFS=$'\n'
+    for item in ${items}; do
+        options+=("$item" "$item")
+    done
+    unset IFS
+    local v=$(_menu "Select Video Driver" "." "${options[@]}")
+    if [ "$?" == "0" ]; then
+        clear
+        cpm_install "$v"
+    fi
+    pressanykey
+}
+
+select_disk() {
+    items=$(lsblk -d -p -n -l -o NAME,SIZE -e 7,11)
+    options=()
+    OIFS=$IFS
+    IFS=$'\n'
+    for item in ${items}; do
+        options+=("$item" "$item")
+    done
+    IFS=$OIFS
+    result=$(_menu "Select disk" "." "${options[@]}")
+    if [ "$?" == "0" ]; then
+        echo ${result%%\ *}
+        return 0
+    fi
+    return 1
+}
+
+select_multi_disk() {
+    items=$(lsblk -d -p -n -l -o NAME,SIZE -e 7,11)
+    options=()
+    OIFS=$IFS
+    IFS=$'\n'
+    for item in ${items}; do
+        options+=("$item" "$item" "off")
+    done
+    IFS=$OIFS
+    result=$(_multiselect_menu "Select Disks" "${options[@]}")
+	result=$(echo "$result" | tr -d '"')
+	for res in ${result}; do
+	    if [[ "$res" == "/dev/"* ]]; then
+            echo ${res%%\ *}
+		fi
+	done
+}
+
+partition() {
+    # partition the disks
+    swap="$1"
+    if [ "$swap" == "1" ]; then
+        root=3
+    else
+        root=2
+    fi
+    clear
+
+    disk=$(select_disk)
+
+    # create partition table
+    if [ "$EFIBOOT" == 1 ]; then
+        parted $disk mktable gpt
+    else
+        parted $disk mktable msdos
+    fi
+    # make efi partition
+    if [ "$EFIBOOT" == 1 ]; then 
+        parted $disk mkpart primary fat32 1MiB 500MiB
+        parted $disk set 1 esp on
+        mkfs.fat -F32 "$disk"1
+        efi_part="$disk"1
+        UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
+        PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
+    fi
+    
+
+    # make swap partition
+    if [ "$swap" == "1" ]; then
+        parted $disk mkpart primary linux-swap 501MiB 2500MiB
+        mkswap "$disk"2
+        swapon "$disk"2
+    fi
+
+    # make main partition
+    parted $disk mkpart primary ext4 2501MiB 100%
+    mkfs.ext4 "$disk"$root
+    PARTUUID_ROOT=$(blkid -s PARTUUID -o value "$disk"$root)
+    UUID_ROOT=$(blkid -s UUID -o value "$disk"$root)
+    ROOT_DEV="$disk$root"
+
+    mount "$disk"$root /mnt
+    mkdir -p /mnt$ESP_DIRECTORY
+    mount "$disk"1 /mnt$ESP_DIRECTORY
+}
+
+partition_disk() {
+	swap="$1"
+    if [ "$swap" == "1" ]; then
+        root=3
+    else
+        root=2
+    fi
+    clear
+
+    disk=$2
+
+	# create partition table
+    if [ "$EFIBOOT" == 1 ]; then
+        parted $disk mktable gpt
+    else
+        parted $disk mktable msdos
+    fi
+    # make efi partition
+    if [ "$EFIBOOT" == 1 ]; then 
+        parted $disk mkpart primary fat32 1MiB 500MiB
+        parted $disk set 1 esp on
+        mkfs.fat -F32 "$disk"1
+        efi_part="$disk"1
+        UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
+        PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
+    fi
+    
+
+    # make swap partition
+    if [ "$swap" == "1" ]; then
+        parted $disk mkpart primary linux-swap 501MiB 2500MiB
+        mkswap "$disk"2
+        swapon "$disk"2
+    fi
+
+    # make main partition
+    parted $disk mkpart primary ext4 2501MiB 100%
+    mkfs.ext4 "$disk"$root
+    PARTUUID_ROOT=$(blkid -s PARTUUID -o value "$disk"$root)
+    UUID_ROOT=$(blkid -s UUID -o value "$disk"$root)
+    ROOT_DEV="$disk$root"
+}
+
+select_parts() {
+    item=$(lsblk -p -n -l -o NAME -e 7,11)
+    options=()
+    for item in ${items}; do
+        options+=("$item" "$item")
+    done
+
+    bootdev=$(_menu "Boot Device" "." "none" "none" ${options[@]})
+    if [ "$?" != "0" ]; then
+        return 1
+    else
+        if [ "${bootdev}" == "none" ]; then
+            bootdev=""
+        fi
+    fi
+
+    swapdev=$(_menu "Swap Device" "." "none" "none" ${options[@]})
+    if [ "$?" != "0" ]; then
+        return 1
+    else
+        if [ "$swapdev" == "none" ]; then
+            swapdev=""
+        fi
+    fi
+
+    rootdev=$(_menu "Root Device" "." ${options[@]})
+    if [ "$?" != "0" ]; then
+        return 1
+    fi
+    realrootdev=${rootdev}
+
+    homedev=$(_menu "Home Device" "." "none" "none" ${options[@]})
+    if [ "$?" != "0" ]; then
+        return 1
+    else
+        if [ "$homedev" == "none"]; then
+            homedev=""
+        fi
+    fi
+
+}
+
+manual_part() {
+    clear
+    echo "About to drop to bash shell for partitioning, type 'exit' when done."
+    echo "${FUNCNAME[0]}"
+    pressanykey
+    bash
+    partition_disks "manual_part"
+}
 
 # Set hostname
-clear
-read -p "Enter hostname: " hostname
-echo ""
-echo $hostname > /mnt/etc/hostname
+set_hostname() {
+    hostname=$(whiptail --backtitle "$main_title" --title "Set hostname" --inputbox "" 0 0 "archlinux" 3>&1 1>&2 2>&3)
+    if [ "$?" == "0" ]; then
+        clear
+        echo "${hostname}" > /mnt/etc/hostname
+    fi
+}
 
 # Set root password
-clear
-echo "Set root password."
-arch-chroot /mnt passwd
-while [ "$?" == "10" ]; do
-    clear
-    echo "Setting root password failed. Please try again."
-    arch-chroot /mnt passwd
-done
+set_root_password() {
+    password=$(get_password)
+    printf "$password\n$password" | arch-chroot /mnt passwd
+}
 
-# Setup user
-clear
-echo "Setup user."
-read -p "Enter username: " username
-echo ""
-arch-chroot /mnt useradd -m $username
-arch-chroot /mnt usermod -aG wheel,audio,video,optical,storage $username
-arch-chroot /mnt passwd $username
-while [ "$?" == "10" ]; do
-    clear
-    echo "Setting password for $username failed. Please try again."
-    arch-chroot /mnt passwd $username
-done
+display_manager() {
+    unset IFS
+    dms=($(get_proper_package_list 2 ${display_managers[@]}))
+     sdm=$(_menu "Display Manager" "." ${dms[@]})
+    cpm_install $sdm
+    eval 'pac=${'$sdm'_additional[@]}'
+    if [ -n "$pac" ]; then
+        options=()
+         IFS=' '
+        pacs=($(get_proper_package_list 1 "$pac"))
+         unset IFS
+         for item in ${pacs[@]}; do
+            echo "$item"
+            options+=("$item" "$item")
+        done
+        result=$(_menu "Display Manager" "." ${options[@]})
+        cpm_install "$result"
+    fi
+    arch-chroot /mnt systemctl enable $sdm.service
+    if type -t $sdm; then
+        $sdm $result
+    fi
+    pressanykey
+    extras_menu ${FUNCNAME[0]}
+}
+
+window_manager() {
+    unset IFS
+    wms=($(get_proper_package_list 2 ${window_managers[@]}))
+    echo "wm"
+    echo ${wms[@]}
+    pressanykey
+    IFS=' '
+    result=$(_menu "Window Manager" "." "${wms[@]}")
+    echo "$result"
+    if [ "$?" == "0" ] && [ -n "$result" ]; then
+        #cpm_install $result
+        unset IFS
+        eval 'pac=${'$result'[@]}'
+        echo "${pac[@]}"
+        pressanykey
+        cpm_install "${pac[@]}"
+    fi
+    pressanykey
+    extras_menu ${FUNCNAME[@]}
+}
+
+gai() {
+    value=$1
+    shift
+    array=($@)
+    echo "${!array[@]}"
+    for i in "${#array[@]}"; do
+        [[ "${array[$i]}" == "$value" ]] && break
+    done
+    echo $i
+}
+
+apps() {
+    default="$1"
+    result=$(_menu "Apps" "$default" "${apps_menu[@]}")
+    if [ "$result" == "install_selected_apps" ]; then
+        install_selected_apps
+    else
+        eval 'pac=${'$result'[@]}'
+        for i in "${!apps_menu[@]}"; do
+            [[ "${apps_menu[$i]}" == "$result" ]] && break
+        done
+        select_apps "${apps_menu[$i+1]}" "${apps_menu[$i+2]}" "${pac[@]}"
+    fi
+}
+
+select_apps() {
+    title="$1"
+    shift
+    array_name="$1"
+    shift
+    options=()
+    for app in ${@}; do
+        options+=("$app" "$app" "off")
+    done
+    result=$(_multiselect_menu "$title" "${options[@]}")
+    apps_to_install+=($(echo $result | tr -d '"'))
+    apps "$array_name"
+}
+
+install_selected_apps() {
+    cpm_install ${apps_to_install[@]}
+    pressanykey
+    extras_menu "apps"
+}
+
+get_password() {
+    while [ "$password_confirmed" != "1" ]; do
+        password=$(whiptail --passwordbox "Password" 0 0 --title "Enter Password" 3>&1 1>&2 2>&3)
+        confirm_password=$(whiptail --passwordbox "Password" 0 0 --title "Confirm Password" 3>&1 1>&2 2>&3)
+        if [ "$password" == "$confirm_password" ]; then
+            password_confirmed=1
+        else
+            whiptail --title "Error" --msgbox "Passwords do not match. Please try again." 0 0 3>&1 1>&2 2>&3
+        fi
+    done
+    echo "$password"
+}
+
+setup_user() {
+    username=$(whiptail --inputbox "Enter username:" 0 0 --title "User" 3>&1 1>&2 2>&3)
+    password=$(get_password)
+    arch-chroot /mnt useradd -m -G wheel,audio,video,optical,storage $username
+    echo -e "$password\n$password" | arch-chroot /mnt passwd $username
+    setup_yadm $username
+    main_menu ${FUNCNAME[0]}
+}
+
+setup_yadm() {
+    username=$1
+    if (whiptail --title "YADM Config" --yesno "Do you have an existing yadm config you would like to enable now?" 0 78); then
+        arch-chroot /mnt pacman -S --noconfirm --needed yadm
+        yadm_repo=$(whiptail --inputbox "Enter git url" 0 0 --title "YADM Config" 3>&1 1>&2 2>&3)
+        mv /mnt/home/$username/.bashrc /mnt/home/$username/.bashrc-backup
+        arch-chroot /mnt su $username -c "yadm clone --bootstrap $yadm_repo"
+        if [ ! -f "/mnt/home/$username/.bashrc" ]; then
+            mv /mnt/home/$username/.bashrc-backup /mnt/home/$username/.bashrc
+        fi
+        if [ -f "/mnt/home/$username/.config/arch-install/packages.txt" ]; then
+            install_extra_packages /mnt/home/$username/.config/arch-install/packages.txt
+        fi
+    fi
+}
+
+bootloader() {
+    if [ "$LVM" == "true" ]; then
+        CMDLINE_LINUX_ROOT="root=$DEVICE_ROOT"
+    else
+        CMDLINE_LINUX_ROOT="root=PARTUUID=$PARTUUID_ROOT"
+    fi
+
+    options=()
+    options+=("install_grub" "grub")
+    options+=("install_refind" "refind")
+    options+=("install_systemd" "systemd")
+    options+=("skip" "Skip")
+    result=$(_menu "Bootloader" "." "${options[@]}")
+    if [ "$result" != "skip" ]; then
+        $result
+    fi
+}
+
+install_grub() {
+    cpm_install "grub dosfstools os-prober"
+    if [ "$efiboot" == "1" ]; then
+        cpm_install "efibootmgr"
+        arch-chroot /mnt grub-install --target-x86_64-efi --efi-directory=$ESP_DIRECTORY --bootloader-id=GRUB
+    else
+        arch-chroot /mnt grub-install --target-i386-pc --recheck $DEVICE
+    fi
+    arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+}
+
+install_refind() {
+    cpm_install "refind"
+    arch-chroot /mnt refind-install
+
+    arch-chroot /mnt rm -rf /boot/refind_linux.conf
+    arch-chroot /mnt sed -i 's/^timeout.*/timeout 3/' $ESP_DIRECTORY/EFI/refind/refind.conf
+
+    echo "\"Arch Linux\" \"root=UUID=$UUID_ROOT rw add_efi_memmap\"" > /mnt/boot/refind_linux.conf
+    echo "\"Arch Linux Fallback\" \"root=UUID=$UUID_ROOT rw add_efi_memmap initrd=/initramds-linux-fallback.img\"" >> /mnt/boot/refind_linux.conf
+    echo "\"Arch Linux Terminal\" \"root=UUID=$UUID_ROOT rw add_efi_memmap systemd.unit=multi-user.target\"" >> /mnt/boot/refind_linux.conf
+    
+    refind_microcode=""
+    if ! lspci | grep -iq virt; then
+        if lscpu | grep -q GenuineIntel; then
+            refind_microcode="initrd=/intel-ucode.img"
+        elif lscpu | grep -q AuthenticAMD; then
+            refind_microcode="initrd=/amd-ucode.img"
+        fi
+    fi
+    #refindconf=/mnt$ESP_DIRECTORY/EFI/refind/refind.conf
+    #echo "" >> $refindconf
+    #echo "menuentry \"Arch Linux\" {" >> $refindconf
+    #echo "    volume  \"Arch Linux\"" >> $refindconf
+    #echo "    loader  /vmlinuz-linux" >> $refindconf
+    #echo "    initrd  /initramfs-linux.img" >> $refindconf
+    #echo "    icon    /EFI/refind/icons/os_arch.png" >> $refindconf
+    #echo "    options \"$REFIND_MICROCODE $CMDLINE_LINUX_ROOT rw $CMDLINE_LINUX\"" >> $refindconf
+    #echo "    submenuentry \"Boot using fallback initramfs\"" >> $refindconf
+    #echo "        initrd /initramfs-linux-fallback.img"
+    #echo "    }" >> $refindconf
+    #echo "}" >> $refindconf
+
+    #if [ "$VIRT" == "1" ]; then
+    #    echo -n "\EFI\refind\refind_x64.efi" > /mnt$ESP_DIRECTORY/startup.nsh
+    #fi
+    pressanykey
+}
+
+install_systemd() {
+    BOOTLOADER="systemd"
+
+    parttype=$(blkid -s TYPE -o value $ROOT_DEV)
+
+    arch-chroot /mnt systemd-machine-id-setup
+    arch-chroot /mnt bootctl --path="$ESP_DIRECTORY" install
+    mkdir -p "/mnt/boot/loader/entries"
+    cp /mnt/usr/share/systemd/bootctl/arch.conf /mnt/boot/loader/entries
+	if [ -n "$PARTUUID_ROOT" ]; then
+        sed -i "s/PARTUUID=XXXX/PARTUUID=$PARTUUID_ROOT/" /mnt/boot/loader/entries/arch.conf
+	else
+	    sed -i "s/PARTUUID=XXXX/UUID=$UUID_ROOT/" /mnt/boot/loader/entries/arch.conf
+	fi
+    sed -i "s/XXXX/${parttype}/" /mnt/boot/loader/entries/arch.conf
+
+    cp /mnt/boot/loader/entries/arch.conf /mnt/boot/loader/entries/arch-fallback.conf
+    sed -i "s/Arch Linux/Arch Linux Fallback/" /mnt/boot/loader/entries/arch-fallback.conf
+    sed -i "s/initramfs-linux/initramfs-linux-fallback/" /mnt/boot/loader/entries/arch-fallback.conf
+
+    #sysconfig=/mnt/boot/loader/loader.conf
+    #echo "timeout 5" >> $sysconfig
+    #echo "default archlinux" >> $sysconfig
+
+    pressanykey
+}
 
 # update packages
-clear
-arch-chroot /mnt pacman -Syu --noconfirm
+#clear
+#arch-chroot /mnt pacman -Syu --noconfirm
 
 # bootloader
-clear
-echo "Install bootloader"
-arch-chroot /mnt pacman -S --noconfirm grub efibootmgr dosfstools os-prober mtools
+#clear
+#echo "Install bootloader"
+#cpm_install "grub efibootmgr dosfstools os-prober mtools"
 
 # mount efi partition
-mkdir -p /mnt/boot/EFI
-mount $efi_part /mnt/boot/EFI
+#mkdir -p /mnt/boot/EFI
+#mount $efi_part /mnt/boot/EFI
 
 # install grub
-arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/EFI --bootloader-id=GRUB
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
-
-# install networkmanager
-arch-chroot /mnt pacman -S --noconfirm networkmanager
-arch-chroot /mnt systemctl enable NetworkManager
+#arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/boot/EFI --bootloader-id=GRUB
+#arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
 
 # Install graphics driver
-clear
-echo "Install video driver."
-packages=$(pacman -Ssq xf86-video)
-i=1
-IFS=$'\n'
-for v in ${packages[@]}; do
-    names=(${names[@]} "$i $v")
-    array[$i]=$v
-    i=$(($i + 1))
-done
-echo "${names[@]/%/$'\n'}" | column
-read -p "Enter selection: " video_driver
-arch-chroot /mnt pacman -S --noconfirm ${array[$video_driver]}
+#clear
+#echo "Install video driver."
+#packages=$(pacman -Ssq xf86-video)
+#i=1
+#IFS=$'\n'
+#for v in ${packages[@]}; do
+#    names=(${names[@]} "$i $v")
+#    array[$i]=$v
+#    i=$(($i + 1))
+#done
+#echo "${names[@]/%/$'\n'}" | column
+#video_driver=$(_read "Enter selection: ")
+#cpm_install "${array[$video_driver]}"
 
 # Install X
-arch-chroot /mnt pacman -S --noconfirm xorg xorg-xinit xterm
-
-# Install Display Manager
-arch-chroot /mnt pacman -S --noconfirm lightdm lightdm-gtk-greeter
-arch-chroot /mnt systemctl enable lightdm
-
-dess=("xfce4" "qtile" "gnome" "plasma")
-xfce4=("xfce4" "xfce4-goodies")
-qtile=("qtile" "dmenu")
-gnome=("gnome" "gnome-extra")
-plasma=("plasma" "kde-applications")
-
-i=1
-names=()
-for d in ${dess[@]}; do
-    names=("${names[@]}" "$i $d")
-    des[$i]=$d
-    i=$(($i + 1))
-done
-clear
-echo "Select Window Manager."
-echo "${names[@]/%/$'\n'}" | column
-read -p "Enter selection: " de
-eval 'pac=${'${des[$de]}'[@]}'
-echo $pac
-IFS=' '
-arch-chroot /mnt pacman -S --noconfirm $pac
-
-#arch-chroot /mnt pacman -S --noconfirm qtile dmenu
-
-# Install fonts
-arch-chroot /mnt pacman -S --noconfirm noto-fonts opendesktop-fonts otf-font-awesome
-
-# Install xfce4-terminal
-arch-chroot /mnt pacman -S --noconfirm xfce4-terminal
+#cpm_install "xorg xorg-xinit xtem"
 
 # Install base-devel
-arch-chroot /mnt pacman -S --noconfirm base-devel git 
+#cpm_install "base-devel git"
 
 # Install arch-repo (gmillz)
-echo "" >> /mnt/etc/pacman.conf
-echo "[arch-repo]" >> /mnt/etc/pacman.conf
-echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
-echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
+#echo "" >> /mnt/etc/pacman.conf
+#echo "[arch-repo]" >> /mnt/etc/pacman.conf
+#echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
+#echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
 
 # Install paru
-arch-chroot /mnt pacman -Sy
-arch-chroot /mnt pacman -S --noconfirm paru
+#arch-chroot /mnt pacman -Sy
+#cpm_install "paru"
 
 # makepkg config mods
-sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$(nproc)\"/g" /mnt/etc/makepkg.conf
-sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z --threads=0 -)/g" /mnt/etc/makepkg.conf
-sed -i "s/COMPRESSZST=(zstd -c -z -q -)/COMPRESSZST=(zstd -c -z -q --threads=0 -)/g" /mnt/etc/makepkg.conf
+#sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$(nproc)\"/g" /mnt/etc/makepkg.conf
+#sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z --threads=0 -)/g" /mnt/etc/makepkg.conf
+#sed -i "s/COMPRESSZST=(zstd -c -z -q -)/COMPRESSZST=(zstd -c -z -q --threads=0 -)/g" /mnt/etc/makepkg.conf
 
 # YADM config
-clear
-read -p "Do you have an existing yadm config you would like to enable now? (y/N) " yadm_config
-if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
-    arch-chroot /mnt pacman -S --noconfirm yadm
-    clear
-    read -p "Enter git url to your yadm repo: " yadm_repo
-    mv /mnt/home/$username/.bashrc /mnt/home/$username/.bashrc-backup
-    arch-chroot /mnt su $username -c "yadm clone --bootstrap $yadm_repo"
-    if [ ! -f "/mnt/home/$username/.bashrc" ]; then
-        mv /mnt/home/$username/.bashrc-backup /mnt/home/$username/.bashrc
-    fi
-fi
+#clear
+#yadm_config=$(_read "Do you have an existing yadm config you would like to enable now? (y/N) ")
+#if [ "$yadm_config" == "Y" ] || [ "$yadm_config" == "y" ]; then
+#    arch-chroot /mnt pacman -S --noconfirm yadm
+#    clear
+#    yadm_repo=$(_read "Enter git url to your yadm repo: ")
+#    mv /mnt/home/$username/.bashrc /mnt/home/$username/.bashrc-backup
+#    arch-chroot /mnt su $username -c "yadm clone --bootstrap $yadm_repo"
+#    if [ ! -f "/mnt/home/$username/.bashrc" ]; then
+#        mv /mnt/home/$username/.bashrc-backup /mnt/home/$username/.bashrc
+#    fi
+#fi
 
 # extra-packages
 install_extra_packages() {
     packages=($(grep "^[^#;]" $1))
-    arch-chroot /mnt su $username -c "paru --skipreview --sudoflags \"-S\" -S --noconfirm $(grep "^[^#;]" $1 | tr "\n" " ")"
+    cpm_install "$(grep "^[^#;]" $1 | tr "\n" " ")"
 }
-clear
-if [ -f "packages.txt" ]; then
-    echo "Installing extra packages defined by user"
-    install_extra_packages packages.txt
+
+#clear
+#if [ -f "packages.txt" ]; then
+#    echo "Installing extra packages defined by user"
+#    install_extra_packages packages.txt
 # check arch-install config dir in case of packages.txt in yadm repo
-elif [ -f "/mnt/home/$username/.config/arch-install/packages.txt" ]; then
-    install_extra_packages /mnt/home/$username/.config/arch-install/packages.txt
-else
-    read -p "Do you want to install additional packages from url containing packages.txt? (y/N) " answer
-    if [ "$answer" == "Y" ] || [ "$answer" == "y" ]; then
-        clear
-        read -p "Enter url to packages.txt file: " packages_url
-        curl -s $packages_url -o packages.txt
-        install_extra_packages packages.txt
-    fi
-fi
+#elif [ -f "/mnt/home/$username/.config/arch-install/packages.txt" ]; then
+#    install_extra_packages /mnt/home/$username/.config/arch-install/packages.txt
+#else
+#    answer=$(_read "Do you want to install additional packages from url containing packages.txt? (y/N) ")
+#    if [ "$answer" == "Y" ] || [ "$answer" == "y" ]; then
+#        clear
+#        packages_url=$(_read "Enter url to packages.txt file: ")
+#        curl -s $packages_url -o packages.txt
+#        install_extra_packages packages.txt
+#    fi
+#fi
+
+# Install Display Manager
+#i=1
+#names=()
+#for d in ${display_managers[@]}; do
+#    names=("${names[@]}" "$i $d")
+#    dms[$i]=$d
+#    i=$(($i + 1))
+#done
+#clear
+#echo "Select Display Manager."
+#echo "${names[@]/%/$'\n'}" | column
+#dm=$(_read "Enter selection: ")
+#dm=${dms[$dm]}
+#cpm_install $dm
+#eval 'pac=${'$dm'_additional[@]}'
+#if [ -n "$pac" ]; then
+#    cpm_install "$pac"
+#fi
+#arch-chroot /mnt systemctl enable $dm.service
+
+#dess=("xfce4" "qtile" "gnome" "plasma")
+#xfce4=("xfce4" "xfce4-goodies")
+#qtile=("qtile" "dmenu")
+#gnome=("gnome" "gnome-extra")
+#plasma=("plasma" "kde-applications")
+
+#i=1
+#names=()
+#for d in ${window_managers[@]}; do
+#    names=("${names[@]}" "$i $d")
+#    des[$i]=$d
+#    i=$(($i + 1))
+#done
+#clear
+#echo "Select Window Manager."
+#echo "${names[@]/%/$'\n'}" | column
+#de=$(_read "Enter selection: ")
+#eval 'pac=${'${des[$de]}'[@]}'
+#cpm_install "$pac"
+
+# Install fonts
+#cpm_install "noto-fonts opendesktop-fonts otf-font-awesome"
+
+#answer=$(_read "Would you like to install additional packages? (Y/n)")
+#if [ "$answer" == "Y" ] || [ "$answer" == "y" ]; then
+#    #Web Browsers
+#    list_install "${$web_browsers[@]}"
+#}
 
 #unmount
-umount -l /mnt
+#umount -l /mnt
+
+main_menu
