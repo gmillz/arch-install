@@ -194,9 +194,13 @@ logical_raid() {
 	done
 	IFS=' '
 	vgcreate arch ${logdisks[@]}
-	lvcreate -l 100%FREE arch -n rootvol
+    lvcreate -i "${#logdisks[@]}" -I 8 -L 50G arch -n rootvol
+	lvcreate -i "${#logdisks[@]}" -I 32 -l 100%FREE arch -n homevol
 	mkfs.ext4 /dev/arch/rootvol
+    mkfs.ext4 /dev/arch/homevol
 	mount /dev/arch/rootvol /mnt
+    mkdir /mnt/home
+    mount /dev/arch/homevol /mnt/home
 	mkdir /mnt/boot
 	mount $efi_part /mnt$ESP_DIRECTORY
     PARTUUID_ROOT=$(blkid -s PARTUUID -o value /dev/arch/rootvol)
