@@ -177,19 +177,22 @@ logical_raid() {
         else
             parted $disk mktable msdos
         fi
+        if [[ "$disk" == *"nvme"* ]]; then
+            dp=p
+        fi
         # make efi partition
         if [ "$EFIBOOT" == 1 ] && [ -z "$UUID_BOOT" ]; then 
             parted $disk mkpart primary fat32 1MiB 500MiB
             parted $disk set 1 esp on
 			parted $disk mkpart primary 501MiB 100%
-			logdisks+=(${disk}2)
-            mkfs.fat -F32 "$disk"1
-            efi_part="$disk"1
-            UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
-            PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
+			logdisks+=(${disk}${dp}2)
+            mkfs.fat -F32 ${disk}${dp}1
+            efi_part=${disk}${dp}1
+            UUID_BOOT=$(blkid -s UUID -o value ${disk}${dp}1)
+            PARTUUID_BOOT=$(blkid -s PARTUUID -o value ${disk}${dp}1)
 		else
 		    parted $disk mkpart primary 1MB 100%
-			logdisks+=(${disk}1)
+			logdisks+=(${disk}${dp}1)
         fi
 	done
 	IFS=' '
@@ -398,6 +401,10 @@ partition() {
 
     disk=$(select_disk)
 
+    if [[ "$disk" == *"nvme"* ]]; then
+        dp=p
+    fi
+
     # create partition table
     if [ "$EFIBOOT" == 1 ]; then
         parted $disk mktable gpt
@@ -408,73 +415,32 @@ partition() {
     if [ "$EFIBOOT" == 1 ]; then 
         parted $disk mkpart primary fat32 1MiB 500MiB
         parted $disk set 1 esp on
-        mkfs.fat -F32 "$disk"1
-        efi_part="$disk"1
-        UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
-        PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
+        mkfs.fat -F32 ${disk}${dp}1
+        efi_part=${disk}${dp}1
+        UUID_BOOT=$(blkid -s UUID -o value ${disk}${dp}1)
+        PARTUUID_BOOT=$(blkid -s PARTUUID -o value ${disk}${dp}1)
     fi
     
 
     # make swap partition
     if [ "$swap" == "1" ]; then
         parted $disk mkpart primary linux-swap 501MiB 2500MiB
-        mkswap "$disk"2
-        swapon "$disk"2
+        mkswap ${disk}${dp}2
+        swapon ${disk}${dp}2
     fi
 
     # make main partition
     parted $disk mkpart primary ext4 2501MiB 100%
-    mkfs.ext4 "$disk"$root
-    PARTUUID_ROOT=$(blkid -s PARTUUID -o value "$disk"$root)
-    UUID_ROOT=$(blkid -s UUID -o value "$disk"$root)
-    ROOT_DEV="$disk$root"
+    mkfs.ext4 ${disk}${dp}${root}
+    PARTUUID_ROOT=$(blkid -s PARTUUID -o value ${disk}${dp}${root})
+    UUID_ROOT=$(blkid -s UUID -o value ${disk}${dp}${root})
+    ROOT_DEV=${disk}${dp}${root}
 
-    mount "$disk"$root /mnt
-    mkdir -p /mnt$ESP_DIRECTORY
-    mount "$disk"1 /mnt$ESP_DIRECTORY
-}
-
-partition_disk() {
-	swap="$1"
-    if [ "$swap" == "1" ]; then
-        root=3
-    else
-        root=2
+    mount ${disk}${dp}${root} /mnt
+    if [ "$EFIBOOT" == 1]; then
+        mkdir -p /mnt$ESP_DIRECTORY
+        mount ${disk}${dp}1 /mnt$ESP_DIRECTORY
     fi
-    clear
-
-    disk=$2
-
-	# create partition table
-    if [ "$EFIBOOT" == 1 ]; then
-        parted $disk mktable gpt
-    else
-        parted $disk mktable msdos
-    fi
-    # make efi partition
-    if [ "$EFIBOOT" == 1 ]; then 
-        parted $disk mkpart primary fat32 1MiB 500MiB
-        parted $disk set 1 esp on
-        mkfs.fat -F32 "$disk"1
-        efi_part="$disk"1
-        UUID_BOOT=$(blkid -s UUID -o value "$disk"1)
-        PARTUUID_BOOT=$(blkid -s PARTUUID -o value "$disk"1)
-    fi
-    
-
-    # make swap partition
-    if [ "$swap" == "1" ]; then
-        parted $disk mkpart primary linux-swap 501MiB 2500MiB
-        mkswap "$disk"2
-        swapon "$disk"2
-    fi
-
-    # make main partition
-    parted $disk mkpart primary ext4 2501MiB 100%
-    mkfs.ext4 "$disk"$root
-    PARTUUID_ROOT=$(blkid -s PARTUUID -o value "$disk"$root)
-    UUID_ROOT=$(blkid -s UUID -o value "$disk"$root)
-    ROOT_DEV="$disk$root"
 }
 
 select_parts() {
