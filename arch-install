@@ -437,7 +437,7 @@ partition() {
     ROOT_DEV=${disk}${dp}${root}
 
     mount ${disk}${dp}${root} /mnt
-    if [ "$EFIBOOT" == 1]; then
+    if [ "$EFIBOOT" == 1 ]; then
         mkdir -p /mnt$ESP_DIRECTORY
         mount ${disk}${dp}1 /mnt$ESP_DIRECTORY
     fi
