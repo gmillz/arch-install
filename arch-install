@@ -45,15 +45,15 @@ check_internet() {
 cpm_install() {
     IFS=' '
     packages=($@)
-    if [ "$AUR_ENABLED" == "0" ]; then
+    #if [ "$AUR_ENABLED" == "0" ]; then
         arch-chroot /mnt pacman -S --noconfirm --needed ${packages[@]}
-    else
-        arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) ALL$/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
-        for package in ${packages[@]}; do
-            arch-chroot /mnt su paru -c "paru -S --noconfirm --needed --skipreview $package"
-        done
-        arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) NOPASSWD: ALL$/%wheel ALL=(ALL) ALL/' /etc/sudoers
-    fi
+    #else
+    #    arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) ALL$/%wheel ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers
+    #    for package in ${packages[@]}; do
+    #        arch-chroot /mnt "paru -S --noconfirm --needed --skipreview $package"
+    #    done
+    #    arch-chroot /mnt sed -i 's/^%wheel ALL=(ALL) NOPASSWD: ALL$/%wheel ALL=(ALL) ALL/' /etc/sudoers
+    #fi
 }
 
 get_proper_package_list() {
@@ -246,16 +246,15 @@ base_install() {
     set_locale
     set_root_password
     bootloader
-    enable_aur
-	config_mkinitcpio
-	pressanykey
+    config_mkinitcpio
+    pressanykey
 
 	# makepkg config mods
     sed -i "s/#MAKEFLAGS=\"-j2\"/MAKEFLAGS=\"-j$(nproc)\"/g" /mnt/etc/makepkg.conf
     sed -i "s/COMPRESSXZ=(xz -c -z -)/COMPRESSXZ=(xz -c -z --threads=0 -)/g" /mnt/etc/makepkg.conf
     sed -i "s/COMPRESSZST=(zstd -c -z -q -)/COMPRESSZST=(zstd -c -z -q --threads=0 -)/g" /mnt/etc/makepkg.conf
 
-    main_menu setup_user
+    main_menu enable_aur
 }
 
 config_mkinitcpio() {
@@ -285,24 +284,30 @@ config_mkinitcpio() {
 
 enable_aur() {
     # Install arch-repo (gmillz)
-    if ! grep -q arch-repo /mnt/etc/pacman.conf; then
-        echo "" >> /mnt/etc/pacman.conf
-        echo "[arch-repo]" >> /mnt/etc/pacman.conf
-        echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
-        echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
-    fi
+    #if ! grep -q arch-repo /mnt/etc/pacman.conf; then
+    #    echo "" >> /mnt/etc/pacman.conf
+    #    echo "[arch-repo]" >> /mnt/etc/pacman.conf
+    #    echo "SigLevel = Optional DatabaseOptional" >> /mnt/etc/pacman.conf
+    #    echo "Server = https://gitlab.com/gmillz/\$repo/-/raw/master/\$arch" >> /mnt/etc/pacman.conf
+    #fi
 
     # Enable multilib
     sed -i 's/#\[multilib\]/\[multilib\]/' /mnt/etc/pacman.conf
     sed -i '/\[multilib\]/{n;s/.*/Include = \/etc\/pacman.d\/mirrorlist/}' /mnt/etc/pacman.conf
 
     # Install paru
-    arch-chroot /mnt pacman -Sy
-    arch-chroot /mnt pacman -S --needed --noconfirm paru base-devel multilib-devel
-    complete_package_list=$(arch-chroot /mnt paru -Slq)
     AUR_ENABLED=$( ! arch-chroot /mnt which paru; echo $?)
-    arch-chroot /mnt useradd -m -G wheel,storage paru
-    #printf "paru\nparu" | arch-chroot /mnt passwd paru
+    #if [ "$AUR_ENABLED" == "0" ]; then 
+        arch-chroot /mnt pacman -Sy
+        arch-chroot /mnt pacman -S --needed --noconfirm base-devel multilib-devel
+        arch-chroot /mnt git clone https://aur.archlinux.org/paru.git
+        arch-chroot /mnt cd paru && makepkg -si
+        complete_package_list=$(arch-chroot /mnt paru -Slq)
+        arch-chroot /mnt useradd -m -G wheel,storage paru
+        printf "paru\nparu" | arch-chroot /mnt passwd paru
+    #fi
+
+    main_menu setup_user
 }
 
 set_keymap() {
